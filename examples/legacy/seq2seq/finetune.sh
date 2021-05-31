@@ -16,9 +16,12 @@
 # run ./finetune.sh --help to see all the possible options
 python finetune_trainer.py \
     --learning_rate=3e-5 \
-    --fp16 \
     --do_train --do_eval --do_predict \
     --evaluation_strategy steps \
     --predict_with_generate \
     --n_val 1000 \
-    "$@"
+    --per_device_train_batch_size 2 \
+    --data_dir /home/nudatalab/annotated_files/cnn_dm_10000/ \
+    --srl_dir /home/nudatalab/annotated_files/outputs/cnn10000/convert/ \
+    --output_dir /home/nudatalab/annotated_files/cnn_dm_10000/output/ \
+    --model_name_or_path facebook/bart-large \

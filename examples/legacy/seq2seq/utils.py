@@ -22,7 +22,8 @@ import socket
 from logging import getLogger
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Tuple, Union
-
+import nltk
+import re
 import git
 import numpy as np
 import torch
@@ -45,6 +46,92 @@ try:
 except (ImportError, ModuleNotFoundError):
     FAIRSEQ_AVAILABLE = False
 
+
+def search_words_in_sent(words,sents,count):
+    for loc,(sent,w) in sents.items():
+            if all(x in sent for x in words ):
+                w.extend(words)
+                sents[loc]=(sent,w)
+                count+=1
+                return sents,True,count
+                   
+    return sents,False,count
+
+def mod_set_sep(sents,source_line):
+    temp={}
+    for k,(sent,_) in sents.items():
+        beg = source_line.find(sent)
+        end = beg+len(sent)
+        if beg !=0 :
+                if source_line[beg-1]==" ":
+                    sent = source_line[beg-1:end]
+        temp[k] = (sent,[])
+    return temp
+
+def get_attention_mask(sents,tokenizer):
+    am=[1]
+    count=0
+    for _,(sent,wrd) in sents.items():
+        tok = tokenizer.tokenize(sent)
+        count+= len(tok)
+        temp= [0]*len(tokenizer.tokenize(sent)) # for a given sentence we tokenize them , find the length 
+        # and create a list with 0 of that length. We change the values to one for the position of 
+        #the word found in the sentence 
+        wr = list(set(wrd)) # the contains repetitions we remove them
+        for word in wr:
+            beg,end = re.search(word, sent).span()
+            if beg !=0 :
+                nw = sent[beg-1:end]
+            else:
+                nw = sent[beg:end]
+            nw = tokenizer.tokenize(nw)
+
+            if nw[0] in tok:
+                ind = tok.index(nw[0])
+                if tok[ind:ind+len(nw)] == nw:
+                    temp1 = temp[:ind]+[1]*len(nw)+temp[ind+len(nw):]
+                    temp = temp1
+
+        am.extend(temp)
+    return am+[1],count
+  
+def get_AM(batch,max_size,tokenizer):
+    attn=[]
+    for bat in batch:
+        source_line = bat["src_texts"]
+        qqt= bat["srl"]
+        op = nltk.sent_tokenize(source_line) 
+        sents = {num:(val,[]) for num,val in enumerate(nltk.sent_tokenize(source_line))}
+        sents = mod_set_sep(sents,source_line)
+        count=0
+        if len(qqt) !=0:
+            for temp in qqt: # going through the list of SRL
+                words_t = temp['subject'].split()+temp['object'].split() +temp['relation'].split()# list of all the words present in the SRL
+                words =[w for w in words_t if (w.isalpha() and w!="mask" and len(w)>1)]
+                # need to check if all these words are present in the same sentence
+                sents,found,count= search_words_in_sent(words,sents,count)
+                if found ==False:
+                    words_t = temp['subject'].split()+temp['object'].split()
+                    words =[w for w in words_t if (w.isalpha() and w!="mask" and len(w)>1)]
+                    sents,found,count= search_words_in_sent(words,sents,count)
+            # we create a dictionary 
+            """
+            sent_num : sent,words in sent that dont have to be masked
+            """
+            am,c=get_attention_mask(sents,tokenizer)
+        
+        else:
+            am=[1]+[1]*len(tokenizer.tokenize(source_line))+[1]
+        if len(am) < max_size:
+            am.extend([0]*(max_size-len(am)))
+        elif len(am) > max_size:
+            am = am[:max_size]
+        attn.append(am)
+    
+    return torch.tensor(attn)
+        
+                  
+        
 
 def label_smoothed_nll_loss(lprobs, target, epsilon, ignore_index=-100):
     """From fairseq"""
@@ -127,6 +214,7 @@ class AbstractSeq2SeqDataset(Dataset):
         self,
         tokenizer,
         data_dir,
+        srl_dir,
         max_source_length,
         max_target_length,
         type_path="train",
@@ -137,6 +225,7 @@ class AbstractSeq2SeqDataset(Dataset):
         super().__init__()
         self.src_file = Path(data_dir).joinpath(type_path + ".source")
         self.tgt_file = Path(data_dir).joinpath(type_path + ".target")
+        self.srl_file = Path(srl_dir).joinpath(type_path + ".source")
         self.len_file = Path(data_dir).joinpath(type_path + ".len")
         if os.path.exists(self.len_file):
             self.src_lens = pickle_load(self.len_file)
@@ -259,12 +348,20 @@ class Seq2SeqDataset(AbstractSeq2SeqDataset):
         index = index + 1  # linecache starts at 1
         source_line = self.prefix + linecache.getline(str(self.src_file), index).rstrip("\n")
         tgt_line = linecache.getline(str(self.tgt_file), index).rstrip("\n")
+        #print(str(index)+"\n"+source_line+"\n"+tgt_line)
+        srl  = linecache.getline(str(self.srl_file), index).rstrip("\n")
+        if len(srl) != 0:
+            srl = eval(srl)
+            qqt = sum(srl, [])
+        else:
+            qqt=[]
         assert source_line, f"empty source line for index {index}"
         assert tgt_line, f"empty tgt line for index {index}"
-        return {"tgt_texts": tgt_line, "src_texts": source_line, "id": index - 1}
+        return {"tgt_texts": tgt_line, "src_texts": source_line, "id": index - 1,"srl":qqt}
 
     def collate_fn(self, batch) -> Dict[str, torch.Tensor]:
         """Call prepare_seq2seq_batch."""
+        
         batch_encoding: Dict[str, torch.Tensor] = self.tokenizer.prepare_seq2seq_batch(
             [x["src_texts"] for x in batch],
             tgt_texts=[x["tgt_texts"] for x in batch],
@@ -339,6 +436,12 @@ class Seq2SeqDataCollator:
             return_tensors="pt",
             **self.dataset_kwargs,
         )
+	
+        attn_mask = get_AM(batch,batch_encoding.data["attention_mask"].shape[1],self.tokenizer)
+        #print(batch_encoding.data["attention_mask"][0])
+        batch_encoding.data["attention_mask"]=attn_mask
+        #print(batch_encoding.data["attention_mask"][0])
+        #print(batch_encoding.data["attention_mask"].shape,batch_encoding.data["input_ids"].shape)
         return batch_encoding.data
 
 

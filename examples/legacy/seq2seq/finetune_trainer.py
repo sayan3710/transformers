@@ -83,6 +83,9 @@ class DataTrainingArguments:
     data_dir: str = field(
         metadata={"help": "The input data dir. Should contain the .tsv files (or other data files) for the task."}
     )
+    srl_dir: str = field(
+        metadata={"help": "The input data dir. Should contain the .tsv files (or other data files) for the task."}
+    )
     task: Optional[str] = field(
         default="summarization",
         metadata={"help": "Task name, summarization (or summarization_{dataset} for pegasus) or translation"},
@@ -158,7 +161,7 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
+    
     check_output_dir(training_args)
 
     # Setup logging
@@ -244,6 +247,7 @@ def main():
             tokenizer,
             type_path="train",
             data_dir=data_args.data_dir,
+            srl_dir=data_args.srl_dir,
             n_obs=data_args.n_train,
             max_target_length=data_args.max_target_length,
             max_source_length=data_args.max_source_length,
@@ -257,6 +261,7 @@ def main():
             tokenizer,
             type_path="val",
             data_dir=data_args.data_dir,
+            srl_dir=data_args.srl_dir,
             n_obs=data_args.n_val,
             max_target_length=data_args.val_max_target_length,
             max_source_length=data_args.max_source_length,
@@ -270,6 +275,7 @@ def main():
             tokenizer,
             type_path="test",
             data_dir=data_args.data_dir,
+            srl_dir=data_args.srl_dir,
             n_obs=data_args.n_test,
             max_target_length=data_args.test_max_target_length,
             max_source_length=data_args.max_source_length,
